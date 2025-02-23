@@ -11,6 +11,9 @@ import (
 //
 // Not currently safe for multiple sequences
 type EncoderCache struct {
+	// config controls mostly backend-specific optimizations
+	config *ml.CacheConfig
+
 	// ** current forward pass **
 
 	// the active layer for Get and Put
@@ -40,7 +43,23 @@ func NewEncoderCache() *EncoderCache {
 }
 
 func (c *EncoderCache) Init(backend ml.Backend, dtype ml.DType, capacity int32) {
+	if c.config == nil {
+		var config ml.CacheConfig
+		if cc, ok := backend.(ml.BackendCacheConfig); ok {
+			config = cc.CacheConfig()
+		}
+		c.config = &config
+	}
+
 	c.cacheCtx = backend.NewContext()
+}
+
+func (c *EncoderCache) SetConfig(config ml.CacheConfig) {
+	if c.config != nil {
+		panic("config cannot be changed after being previously set, either by the model or backend")
+	}
+
+	c.config = &config
 }
 
 func (c *EncoderCache) Close() {
@@ -74,6 +93,10 @@ func (c *EncoderCache) Get(ctx ml.Context) (ml.Tensor, ml.Tensor, ml.Tensor) {
 func (c *EncoderCache) Put(ctx ml.Context, key, value ml.Tensor) {
 	c.encoderPos = c.curPos
 	c.encoderCached = true
+
+	if c.config.PermutedV {
+		value = value.Permute(ctx, 1, 2, 0, 3)
+	}
 
 	if c.keys[c.curLayer] == nil || c.values[c.curLayer] == nil {
 		c.keys[c.curLayer] = c.cacheCtx.Zeros(key.DType(), key.Shape()...)
