@@ -352,28 +352,30 @@ func (b *Backend) Get(name string) ml.Tensor {
 }
 
 func (b *Backend) NewContext() ml.Context {
-	maxTensors := max(8192, len(b.meta.Tensors().Items())*5)
+	maxGraphNodes := max(8192, len(b.meta.Tensors().Items())*5)
 	return &Context{
-		sched:      b.sched,
-		maxTensors: maxTensors,
 		ctx: C.ggml_init(C.struct_ggml_init_params{
-			mem_size: C.size_t(maxTensors)*C.ggml_tensor_overhead() + C.ggml_graph_overhead_custom(C.size_t(maxTensors), false),
+			mem_size: C.size_t(maxGraphNodes)*C.ggml_tensor_overhead() + C.ggml_graph_overhead_custom(C.size_t(maxGraphNodes), false),
 			no_alloc: true,
 		}),
+		sched:         b.sched,
+		backend:       C.ggml_backend_sched_get_backend(b.sched, 0),
+		maxGraphNodes: maxGraphNodes,
 	}
 }
 
 type Context struct {
-	ctx   *C.struct_ggml_context
-	graph *C.struct_ggml_cgraph
-	sched *C.struct_ggml_backend_sched
+	ctx     *C.struct_ggml_context
+	graph   *C.struct_ggml_cgraph
+	backend *C.struct_ggml_backend
+	sched   *C.struct_ggml_backend_sched
 
-	maxTensors int
+	maxGraphNodes int
 }
 
 func (c *Context) Forward(tensors ...ml.Tensor) ml.Context {
 	if c.graph == nil {
-		c.graph = C.ggml_new_graph_custom(c.ctx, C.size_t(c.maxTensors), false)
+		c.graph = C.ggml_new_graph_custom(c.ctx, C.size_t(c.maxGraphNodes), false)
 	}
 
 	for _, tensor := range tensors {
@@ -403,8 +405,8 @@ func (c *Context) Compute(tensors ...ml.Tensor) {
 	}
 }
 
-func (c *Context) MaxTensors() int {
-	return c.maxTensors
+func (c *Context) MaxGraphNodes() int {
+	return c.maxGraphNodes
 }
 
 func shapeToGGML(shape []int) *C.int64_t {
@@ -439,7 +441,7 @@ func (c Context) Zeros(dtype ml.DType, shape ...int) ml.Tensor {
 		panic("unsupported dtype")
 	}
 
-	b := C.ggml_backend_alloc_buffer(C.ggml_backend_sched_get_backend(c.sched, 0), C.ggml_nbytes(t))
+	b := C.ggml_backend_alloc_buffer(c.backend, C.ggml_nbytes(t))
 	C.ggml_backend_tensor_alloc(b, t, C.ggml_backend_buffer_get_base(b))
 	C.ggml_set_zero(t)
 	C.ggml_set_input(t)
@@ -464,7 +466,7 @@ func fromSlice[S ~[]E, E float32 | int32](ctx Context, s S, shape []int, dtype u
 	}
 
 	t := C.ggml_new_tensor(ctx.ctx, dtype, C.int(len(shape)), shapeToGGML(shape))
-	b := C.ggml_backend_alloc_buffer(C.ggml_backend_sched_get_backend(ctx.sched, 0), C.ggml_nbytes(t))
+	b := C.ggml_backend_alloc_buffer(ctx.backend, C.ggml_nbytes(t))
 	C.ggml_backend_tensor_alloc(b, t, C.ggml_backend_buffer_get_base(b))
 	C.ggml_backend_tensor_set(t, unsafe.Pointer(&s[0]), 0, C.ggml_nbytes(t))
 	C.ggml_set_input(t)
@@ -479,8 +481,8 @@ func (c Context) FromIntSlice(s []int32, shape ...int) (ml.Tensor, error) {
 	return fromSlice(c, s, shape, C.GGML_TYPE_I32)
 }
 
-func (c *Context) Close() {
-	if c != nil {
+func (c Context) Close() {
+	if c.ctx != nil {
 		C.ggml_free(c.ctx)
 	}
 }

@@ -52,8 +52,8 @@ type Causal struct {
 
 	shiftFn      shiftFn
 	backend      ml.Backend
-	cacheCtx     ml.Context
-	keys, values []ml.Tensor
+	ctxs         map[int]ml.Context
+	keys, values map[int]ml.Tensor
 }
 
 type cacheCell struct {
@@ -67,11 +67,23 @@ type cellRange struct {
 }
 
 func NewCausalCache(shift shiftFn) *Causal {
-	return &Causal{windowSize: math.MaxInt32, shiftFn: shift}
+	return &Causal{
+		windowSize: math.MaxInt32,
+		shiftFn:    shift,
+		ctxs:       make(map[int]ml.Context),
+		keys:       make(map[int]ml.Tensor),
+		values:     make(map[int]ml.Tensor),
+	}
 }
 
 func NewSWACache(windowSize int32, shift shiftFn) *Causal {
-	return &Causal{windowSize: windowSize, shiftFn: shift}
+	return &Causal{
+		windowSize: windowSize,
+		shiftFn:    shift,
+		ctxs:       make(map[int]ml.Context),
+		keys:       make(map[int]ml.Tensor),
+		values:     make(map[int]ml.Tensor),
+	}
 }
 
 func (c *Causal) Init(backend ml.Backend, dtype ml.DType, capacity int32) {
@@ -80,11 +92,12 @@ func (c *Causal) Init(backend ml.Backend, dtype ml.DType, capacity int32) {
 	c.cells = make([]cacheCell, capacity)
 	c.cellRanges = make(map[int]cellRange)
 	c.backend = backend
-	c.cacheCtx = backend.NewContext()
 }
 
 func (c *Causal) Close() {
-	c.cacheCtx.Close()
+	for _, ctx := range c.ctxs {
+		ctx.Close()
+	}
 }
 
 func (c *Causal) StartForward(ctx ml.Context, positions []int32, seqs []int) error {
@@ -177,7 +190,7 @@ func (c *Causal) buildMask(ctx ml.Context, positions []int32, seqs []int) (ml.Te
 	return ctx.FromFloatSlice(mask, len, c.curBatchSize)
 }
 
-func moveCell(ctx ml.Context, objs []ml.Tensor, src, dst, len int) {
+func moveCell(ctx ml.Context, objs map[int]ml.Tensor, src, dst, len int) {
 	for _, obj := range objs {
 		if obj == nil {
 			continue
@@ -219,7 +232,7 @@ func (c *Causal) defrag() {
 		layers++
 	}
 
-	maxMoves := ctx.MaxTensors() / (6 * layers)
+	maxMoves := ctx.MaxGraphNodes() / (6 * layers)
 	moves := 0
 
 	var pendingSrc, pendingDst, pendingLen int
@@ -293,11 +306,6 @@ func (c *Causal) defrag() {
 }
 
 func (c *Causal) SetLayer(layer int) {
-	if layer >= len(c.keys) {
-		c.keys = append(c.keys, make([]ml.Tensor, layer-len(c.keys)+1)...)
-		c.values = append(c.values, make([]ml.Tensor, layer-len(c.values)+1)...)
-	}
-
 	c.curLayer = layer
 }
 
@@ -325,9 +333,16 @@ func (c *Causal) Put(ctx ml.Context, key, value ml.Tensor) {
 		panic(fmt.Errorf("inconsistent batch sizes (layer: %v, batch size: %v layer batch size: %v)", c.curLayer, c.curBatchSize, key.Dim(2)))
 	}
 
-	if c.keys[c.curLayer] == nil || c.values[c.curLayer] == nil {
-		c.keys[c.curLayer] = c.cacheCtx.Zeros(c.DType, key.Dim(0), key.Dim(1), int(c.Capacity))
-		c.values[c.curLayer] = c.cacheCtx.Zeros(c.DType, value.Dim(0), value.Dim(1), int(c.Capacity))
+	if _, ok := c.ctxs[c.curLayer]; !ok {
+		c.ctxs[c.curLayer] = c.backend.NewContext()
+	}
+
+	if _, ok := c.keys[c.curLayer]; !ok {
+		c.keys[c.curLayer] = c.ctxs[c.curLayer].Zeros(c.DType, key.Dim(0), key.Dim(1), int(c.Capacity))
+	}
+
+	if _, ok := c.values[c.curLayer]; !ok {
+		c.values[c.curLayer] = c.ctxs[c.curLayer].Zeros(c.DType, value.Dim(0), value.Dim(1), int(c.Capacity))
 	}
 
 	ctx.Forward(
