@@ -86,9 +86,24 @@ func (c *Causal) Init(backend ml.Backend, dtype ml.DType, capacity int32) {
 		c.config = &config
 	}
 
+	if c.config.CachePadding == 0 {
+		c.config.CachePadding = 1
+	}
+
+	if c.config.MaskBatchPadding == 0 {
+		c.config.MaskBatchPadding = 1
+	}
+
+	if c.config.MaskDType == ml.DTypeOther {
+		c.config.MaskDType = ml.DTypeF32
+	}
+
 	c.DType = dtype
 	c.Capacity = capacity
-	c.cells = make([]cacheCell, capacity)
+	if c.Capacity < int32(c.config.CachePadding) {
+		c.Capacity = int32(c.config.CachePadding)
+	}
+	c.cells = make([]cacheCell, c.Capacity)
 	c.cellRanges = make(map[int]cellRange)
 	c.backend = backend
 	c.cacheCtx = backend.NewContext()
@@ -176,24 +191,54 @@ func (c *Causal) findStartLoc() (int, error) {
 	return 0, fmt.Errorf("%w (length: %v)", ErrKvCacheFull, c.Capacity)
 }
 
+func pad(length, pad int) int {
+	return ((length + pad - 1) / pad) * pad
+}
+
 // Builds a mask of history x batch indicating whether for each token in the batch the
 // token in the history should apply. This is based on both the sequence and causality (the
 // position of the history is not ahead of the token in the batch).
 func (c *Causal) buildMask(ctx ml.Context, positions []int32, seqs []int) (ml.Tensor, error) {
-	// TODO(jessegross): This does not do padding, which is required for flash attention
-	len := c.curCellRange.max - c.curCellRange.min + 1
-	mask := make([]float32, c.curBatchSize*len)
+	length := c.curCellRange.max - c.curCellRange.min + 1
+
+	// Find the padded length that fits within the cache boundaries
+	length = pad(length, c.config.CachePadding)
+	c.curCellRange.max = c.curCellRange.min + length - 1
+	if c.curCellRange.max+1 > int(c.Capacity) {
+		c.curCellRange.max = int(c.Capacity) - 1
+		c.curCellRange.min = c.curCellRange.max - length + 1
+	}
+
+	batchSize := pad(c.curBatchSize, c.config.MaskBatchPadding)
+	mask := make([]float32, batchSize*length)
 
 	for i := range c.curBatchSize {
 		for j := c.curCellRange.min; j <= c.curCellRange.max; j++ {
 			if !slices.Contains(c.cells[j].sequences, seqs[i]) || c.cells[j].pos > positions[i] ||
 				c.cells[j].pos < positions[i]-c.windowSize {
-				mask[i*len+(j-c.curCellRange.min)] = float32(math.Inf(-1))
+				mask[i*length+(j-c.curCellRange.min)] = float32(math.Inf(-1))
 			}
 		}
 	}
 
-	return ctx.FromFloatSlice(mask, len, c.curBatchSize)
+	// Mask out any padding tokens we added. For padding that we added to the cache history, this
+	// has already been masked out because the sequence doesn't match.
+	for i := c.curBatchSize * length; i < len(mask); i++ {
+		mask[i] = float32(math.Inf(-1))
+	}
+
+	maskTensor, err := ctx.FromFloatSlice(mask, length, batchSize)
+	if err != nil {
+		return nil, err
+	}
+
+	if c.config.MaskDType != ml.DTypeF32 {
+		out := ctx.Empty(c.config.MaskDType, maskTensor.Shape()...)
+		ctx.Forward(maskTensor.Copy(ctx, out))
+		maskTensor = out
+	}
+
+	return maskTensor, nil
 }
 
 func (c *Causal) moveCells(ctx ml.Context, src, dst, len int) {

@@ -41,6 +41,19 @@ type CacheConfig struct {
 	// and return the permuted version via Get. This uses the cache copy operation
 	// to avoid a Contiguous call on the permuted tensor.
 	PermutedV bool
+
+	// CachePadding specifies the multiple for the number of tokens of cache history
+	// that will be returned from cache Get for k, v and mask. The capacity of the
+	// cache itself will also be set to this size if it is configured to be less.
+	CachePadding int
+
+	// MaskDType specifies the data type for generating the mask. If unset it will
+	// default to DTypeF32.
+	MaskDType DType
+
+	// MaskBatchPadding specifies the multiple for the batch size dimension in the mask.
+	// Any position that does not correspond to an actual token will be filled with -Inf.
+	MaskBatchPadding int
 }
 
 // BackendParams controls how the backend loads and executes models
@@ -56,6 +69,9 @@ type BackendParams struct {
 
 	// TensorSplit is the fraction of the model to offload to each GPU
 	TensorSplit []float32
+
+	// FlashAttention indicates that we should use a fused flash attention kernel
+	FlashAttention bool
 }
 
 var backends = make(map[string]func(*os.File, BackendParams) (Backend, error))
