@@ -187,7 +187,7 @@ func (c *Causal) buildMask(ctx ml.Context, positions []int32, seqs []int) (ml.Te
 		}
 	}
 
-	return ctx.FromFloatSlice(mask, len, c.curBatchSize)
+	return ctx.Input().FromFloatSlice(mask, len, c.curBatchSize)
 }
 
 func moveCell(ctx ml.Context, objs map[int]ml.Tensor, src, dst, len int) {
@@ -334,7 +334,7 @@ func (c *Causal) Put(ctx ml.Context, key, value ml.Tensor) {
 	}
 
 	if _, ok := c.ctxs[c.curLayer]; !ok {
-		c.ctxs[c.curLayer] = c.backend.NewContext()
+		c.ctxs[c.curLayer] = c.backend.NewContextSize(2).Layer(c.curLayer)
 	}
 
 	if _, ok := c.keys[c.curLayer]; !ok {
