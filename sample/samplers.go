@@ -12,6 +12,18 @@ type Sampler interface {
 	Sample([]float32) (int32, error)
 }
 
+type tokenInfo struct {
+	id    int
+	logit float64
+	prob  float64
+}
+
+// TODO: see if this is needed to check if things are sorted or not
+type tokenSliceInfo struct {
+	tokens []tokenInfo
+	sorted bool
+}
+
 type weighted struct {
 	src        rand.Source
 	transforms []Transform
@@ -32,25 +44,43 @@ func (s weighted) Sample(logits []float32) (int32, error) {
 		logits64[i] = float64(v)
 	}
 
-	for _, t := range s.transforms {
-		logits64 = t.Apply(logits64)
-	}
+	probs := softmax(logits64)
 
-	logitsCopy := make([]float64, 0, len(logits))
-	indices := make([]int, 0, len(logits))
-	for i, logit := range logits64 {
-		if !math.IsInf(logit, -1) {
-			logitsCopy = append(logitsCopy, logit)
-			indices = append(indices, i)
+	tokens := make([]tokenInfo, len(logits))
+	for i, v := range logits {
+		tokens[i] = tokenInfo{
+			id:    i,
+			logit: float64(v),
+			prob:  probs[i],
 		}
 	}
 
-	if len(logitsCopy) == 0 {
+	for _, t := range s.transforms {
+		tokens = t.Apply(tokens)
+	}
+
+	// logitsCopy := make([]float64, 0, len(logits))
+	// indices := make([]int, 0, len(logits))
+	// for i, logit := range logits64 {
+	// 	if !math.IsInf(logit, -1) {
+	// 		logitsCopy = append(logitsCopy, logit)
+	// 		indices = append(indices, i)
+	// 	}
+	// }
+
+	if len(tokens) == 0 {
 		return -1, errors.New("no valid logits found for weighed sampling")
 	}
 
-	probs := softmax(logitsCopy)
-	w := sampleuv.NewWeighted(probs, s.src)
+	filteredProbs := make([]float64, len(tokens))
+	indices := make([]int, len(tokens))
+	for i, token := range tokens {
+		filteredProbs[i] = token.prob
+		indices[i] = token.id
+	}
+
+	// probs := softmax(logitsCopy)
+	w := sampleuv.NewWeighted(filteredProbs, s.src)
 	if idx, ok := w.Take(); ok {
 		return int32(indices[idx]), nil
 	}
@@ -69,10 +99,6 @@ func (s greedy) Sample(logits []float32) (int32, error) {
 	logits64 := make([]float64, len(logits))
 	for i, v := range logits {
 		logits64[i] = float64(v)
-	}
-
-	for _, t := range s.transforms {
-		logits64 = t.Apply(logits64)
 	}
 
 	var maxIdx int
