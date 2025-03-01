@@ -24,7 +24,6 @@ type Backend interface {
 	Config() Config
 	Get(name string) Tensor
 	NewContext() Context
-	SystemInfo() string
 }
 
 // BackendParams controls how the backend loads and executes models
